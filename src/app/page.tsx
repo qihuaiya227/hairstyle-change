@@ -4,201 +4,119 @@ import { useState, useRef, useCallback } from "react";
 
 type Hairstyle = "short" | "long" | "curly" | "ponytail" | "bun" | "bald";
 
-interface HairstyleOption {
+interface Preset {
   id: Hairstyle;
   name: string;
   emoji: string;
+  prompt: string;
 }
 
-const HAIRSTYLES: HairstyleOption[] = [
-  { id: "short", name: "短发", emoji: "👦" },
-  { id: "long", name: "长发", emoji: "👩" },
-  { id: "curly", name: "卷发", emoji: "👱‍♀️" },
-  { id: "ponytail", name: "马尾", emoji: "💁‍♀️" },
-  { id: "bun", name: "丸子头", emoji: "🧑‍🎓" },
-  { id: "bald", name: "光头", emoji: "😎" },
+const PRESETS: Preset[] = [
+  { id: "short", name: "短发", emoji: "👦", prompt: "A person with a stylish short haircut, realistic portrait photo, studio lighting" },
+  { id: "long", name: "长发", emoji: "👩", prompt: "A person with long flowing hair, realistic portrait photo, studio lighting" },
+  { id: "curly", name: "卷发", emoji: "👱‍♀️", prompt: "A person with beautiful curly hair, realistic portrait photo, studio lighting" },
+  { id: "ponytail", name: "马尾", emoji: "💁‍♀️", prompt: "A person with a high ponytail hairstyle, realistic portrait photo, studio lighting" },
+  { id: "bun", name: "丸子头", emoji: "🧑‍🎓", prompt: "A person with an elegant bun hairstyle, realistic portrait photo, studio lighting" },
+  { id: "bald", name: "光头", emoji: "😎", prompt: "A bald person with shaved head, realistic portrait photo, studio lighting" },
 ];
 
-type Step = "upload" | "preview" | "processing" | "result";
-type ProcessingStatus = "uploading" | "processing" | "complete" | "error";
-
 export default function Home() {
-  const [step, setStep] = useState<Step>("upload");
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [selectedHairstyle, setSelectedHairstyle] = useState<Hairstyle | null>(
-    null
-  );
-  const [processingStatus, setProcessingStatus] =
-    useState<ProcessingStatus>("uploading");
-  const [resultImage, setResultImage] = useState<string | null>(null);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [isDragOver, setIsDragOver] = useState(false);
+  const [imageData, setImageData] = useState<string | null>(null);
+  const [selectedPreset, setSelectedPreset] = useState<Hairstyle | null>(null);
+  const [customPrompt, setCustomPrompt] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [resultUrl, setResultUrl] = useState<string | null>(null);
+  const [fileName, setFileName] = useState<string>("");
+  const [fileSize, setFileSize] = useState<number>(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const predictionIdRef = useRef<string | null>(null);
 
-  const handleFileSelect = useCallback((file: File) => {
+  const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
     if (!file.type.match(/^image\/(jpeg|png|jpg)$/)) {
-      setErrorMessage("请上传 JPG 或 PNG 格式的图片");
+      setError("请上传 JPG 或 PNG 格式的图片");
       return;
     }
+
     if (file.size > 10 * 1024 * 1024) {
-      setErrorMessage("图片大小不能超过 10MB");
+      setError("图片大小不能超过 10MB");
       return;
     }
 
-    setSelectedFile(file);
-    setPreviewUrl(URL.createObjectURL(file));
-    setStep("preview");
-    setErrorMessage(null);
+    setError(null);
+    setFileName(file.name);
+    setFileSize(file.size);
+    setResultUrl(null);
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      setImageData(event.target?.result as string);
+    };
+    reader.readAsDataURL(file);
   }, []);
 
-  const handleDrop = useCallback(
-    (e: React.DragEvent) => {
-      e.preventDefault();
-      setIsDragOver(false);
-      const file = e.dataTransfer.files[0];
-      if (file) {
-        handleFileSelect(file);
-      }
-    },
-    [handleFileSelect]
-  );
-
-  const handleDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragOver(true);
+  const handlePresetClick = useCallback((preset: Preset) => {
+    setSelectedPreset(preset.id);
+    setCustomPrompt(preset.prompt);
   }, []);
-
-  const handleDragLeave = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragOver(false);
-  }, []);
-
-  const handleInputChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      if (file) {
-        handleFileSelect(file);
-      }
-    },
-    [handleFileSelect]
-  );
-
-  const handleStartOver = useCallback(() => {
-    setStep("upload");
-    setSelectedFile(null);
-    if (previewUrl) {
-      URL.revokeObjectURL(previewUrl);
-    }
-    setPreviewUrl(null);
-    setSelectedHairstyle(null);
-    setProcessingStatus("uploading");
-    setResultImage(null);
-    setErrorMessage(null);
-    predictionIdRef.current = null;
-  }, [previewUrl]);
 
   const handleGenerate = useCallback(async () => {
-    if (!selectedFile || !selectedHairstyle) return;
+    const promptToUse = customPrompt.trim();
+    
+    if (!promptToUse) {
+      setError("请选择预设或输入自定义描述");
+      return;
+    }
 
-    setStep("processing");
-    setProcessingStatus("uploading");
-    setErrorMessage(null);
+    setIsGenerating(true);
+    setError(null);
+    setResultUrl(null);
 
     try {
-      // Start prediction
-      const formData = new FormData();
-      formData.append("image", selectedFile);
-      formData.append("hairstyle", selectedHairstyle);
-
-      const response = await fetch("/api/replicate", {
-        method: "POST",
-        body: formData,
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || "Failed to start processing");
-      }
-
-      const { predictionId } = await response.json();
-      predictionIdRef.current = predictionId;
-      setProcessingStatus("processing");
-
-      // Poll for result
-      pollForResult(predictionId);
-    } catch (error) {
-      setProcessingStatus("error");
-      setErrorMessage(
-        error instanceof Error ? error.message : "处理失败，请重试"
-      );
+      // Build the Pollinations URL directly
+      const encodedPrompt = encodeURIComponent(promptToUse);
+      const imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=512&height=512&model=flux&nologo=true&seed=${Date.now()}`;
+      
+      setResultUrl(imageUrl);
+    } catch (err) {
+      setError("生成失败，请重试");
+    } finally {
+      setIsGenerating(false);
     }
-  }, [selectedFile, selectedHairstyle]);
+  }, [customPrompt]);
 
-  const pollForResult = useCallback((predictionId: string) => {
-    const poll = async () => {
-      try {
-        const response = await fetch(`/api/predict?predictionId=${predictionId}`);
-        const data = await response.json();
-
-        if (data.status === "succeeded") {
-          setProcessingStatus("complete");
-          // Output is usually an array, first element is the image URL
-          const imageUrl = Array.isArray(data.output)
-            ? data.output[0]
-            : data.output;
-          setResultImage(imageUrl);
-          setStep("result");
-        } else if (data.status === "failed") {
-          setProcessingStatus("error");
-          setErrorMessage(data.error || "处理失败，请重试");
-        } else {
-          // Still processing, poll again
-          setTimeout(poll, 2000);
-        }
-      } catch (error) {
-        setProcessingStatus("error");
-        setErrorMessage("查询结果失败，请重试");
-      }
-    };
-
-    // Start polling after a short delay
-    setTimeout(poll, 3000);
+  const handleReset = useCallback(() => {
+    setImageData(null);
+    setSelectedPreset(null);
+    setCustomPrompt("");
+    setError(null);
+    setResultUrl(null);
+    setFileName("");
+    setFileSize(0);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
   }, []);
 
-  const handleDownload = useCallback(() => {
-    if (!resultImage) return;
-
-    const link = document.createElement("a");
-    link.href = resultImage;
-    link.download = `hairstyle-${selectedHairstyle}-${Date.now()}.png`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  }, [resultImage, selectedHairstyle]);
-
   return (
-    <div className="min-h-screen bg-[#0a0a0a] text-white">
+    <div className="min-h-screen bg-[#0a0a0a] text-white font-sans">
       {/* Header */}
-      <header className="py-8 text-center">
-        <h1 className="text-4xl font-bold gradient-text mb-2">AI 发型替换</h1>
-        <p className="text-gray-400 text-lg">
-          上传照片，AI 帮你换个新发型
-        </p>
+      <header className="py-6 text-center">
+        <h1 className="text-3xl font-bold bg-gradient-to-r from-[#667eea] to-[#764ba2] bg-clip-text text-transparent mb-1">
+          AI 发型替换
+        </h1>
+        <p className="text-gray-400 text-sm">上传照片 + 选择/输入发型描述</p>
       </header>
 
-      {/* Main Content */}
-      <main className="max-w-2xl mx-auto px-4 pb-12">
-        {/* Step 1: Upload */}
-        {step === "upload" && (
+      {/* Main */}
+      <main className="max-w-4xl mx-auto px-4 pb-8 space-y-5">
+        
+        {/* Upload Area */}
+        {!imageData && (
           <div
-            className={`upload-zone rounded-2xl p-12 text-center cursor-pointer ${
-              isDragOver ? "drag-over" : ""
-            }`}
-            onDrop={handleDrop}
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
+            className="border-2 border-dashed border-gray-700 rounded-2xl p-6 text-center cursor-pointer hover:border-[#667eea] transition-colors"
             onClick={() => fileInputRef.current?.click()}
           >
             <input
@@ -206,159 +124,128 @@ export default function Home() {
               type="file"
               accept="image/jpeg,image/png,image/jpg"
               className="hidden"
-              onChange={handleInputChange}
+              onChange={handleFileChange}
             />
-            <div className="text-6xl mb-4">📸</div>
-            <p className="text-xl font-medium mb-2">
-              点击或拖拽上传照片
-            </p>
-            <p className="text-gray-500 text-sm">
-              支持 JPG/PNG，最大 10MB
-            </p>
-            {errorMessage && (
-              <p className="text-red-400 mt-4">{errorMessage}</p>
-            )}
+            <div className="text-4xl mb-2">📸</div>
+            <p className="text-base font-medium mb-1">点击上传照片</p>
+            <p className="text-gray-500 text-xs">支持 JPG/PNG，最大 10MB</p>
           </div>
         )}
 
-        {/* Step 2: Preview & Select */}
-        {step === "preview" && previewUrl && (
-          <div className="space-y-6">
-            {/* Image Preview */}
-            <div className="rounded-2xl overflow-hidden gradient-border">
-              <img
-                src={previewUrl}
-                alt="Preview"
-                className="w-full h-auto max-h-96 object-contain bg-[#1a1a1a]"
-              />
+        {/* Result - Side by Side Comparison */}
+        <div className="grid grid-cols-2 gap-4">
+          {/* Original */}
+          <div className="rounded-xl bg-[#1a1a1a] overflow-hidden">
+            <div className="px-3 py-2 bg-[#252525] text-center text-xs text-gray-400">
+              原图 {fileName && `(${fileName})`}
             </div>
-
-            {/* Hairstyle Selection */}
-            <div>
-              <h2 className="text-xl font-semibold mb-4 text-center">
-                选择发型
-              </h2>
-              <div className="grid grid-cols-3 gap-4">
-                {HAIRSTYLES.map((style) => (
-                  <button
-                    key={style.id}
-                    onClick={() => setSelectedHairstyle(style.id)}
-                    className={`hairstyle-card p-4 rounded-xl bg-[#1a1a1a] border-2 transition-all ${
-                      selectedHairstyle === style.id
-                        ? "border-[#667eea] shadow-lg shadow-purple-500/20"
-                        : "border-transparent hover:border-gray-600"
-                    }`}
-                  >
-                    <div className="text-4xl mb-2">{style.emoji}</div>
-                    <div className="text-sm font-medium">{style.name}</div>
-                  </button>
-                ))}
-              </div>
+            <div className="flex items-center justify-center min-h-[200px] bg-[#1a1a1a]">
+              {imageData ? (
+                <img
+                  src={imageData}
+                  alt="原图"
+                  className="max-w-full max-h-[300px] object-contain"
+                />
+              ) : (
+                <div className="text-gray-500 text-sm">上传照片后显示</div>
+              )}
             </div>
+          </div>
 
-            {/* Actions */}
-            <div className="flex gap-4">
+          {/* Result */}
+          <div className="rounded-xl bg-[#1a1a1a] overflow-hidden">
+            <div className="px-3 py-2 bg-[#252525] text-center text-xs text-green-400">
+              ✨ 生成结果
+            </div>
+            <div className="flex flex-col items-center justify-center min-h-[200px] bg-[#1a1a1a]">
+              {resultUrl ? (
+                <img
+                  src={resultUrl}
+                  alt="结果"
+                  className="max-w-full max-h-[300px] object-contain"
+                />
+              ) : (
+                <div className="text-gray-500 text-sm">点击生成后显示</div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Upload Button (shown when image exists) */}
+        {imageData && (
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="w-full py-2 rounded-xl bg-[#252525] hover:bg-[#333] transition-colors text-sm"
+          >
+            📷 重新上传照片
+          </button>
+        )}
+
+        {/* Presets */}
+        <div>
+          <h2 className="text-lg font-semibold mb-2 text-center">选择发型预设</h2>
+          <div className="grid grid-cols-6 gap-2">
+            {PRESETS.map((preset) => (
               <button
-                onClick={handleStartOver}
-                className="flex-1 py-4 rounded-xl bg-[#1a1a1a] hover:bg-[#2a2a2a] transition-colors font-medium"
-              >
-                重新上传
-              </button>
-              <button
-                onClick={handleGenerate}
-                disabled={!selectedHairstyle}
-                className={`flex-1 py-4 rounded-xl font-medium transition-all ${
-                  selectedHairstyle
-                    ? "gradient-bg hover:opacity-90 hover:shadow-lg hover:shadow-purple-500/30"
-                    : "bg-gray-700 cursor-not-allowed opacity-50"
+                key={preset.id}
+                onClick={() => handlePresetClick(preset)}
+                className={`p-3 rounded-xl border-2 transition-all ${
+                  selectedPreset === preset.id
+                    ? "border-[#667eea] bg-[#667eea]/20"
+                    : "border-transparent bg-[#1a1a1a] hover:bg-[#2a2a2a]"
                 }`}
               >
-                🚀 开始生成
+                <div className="text-2xl mb-1">{preset.emoji}</div>
+                <div className="text-xs font-medium">{preset.name}</div>
               </button>
-            </div>
+            ))}
           </div>
+        </div>
+
+        {/* Custom Prompt Input */}
+        <div>
+          <h2 className="text-lg font-semibold mb-2 text-center">自定义描述</h2>
+          <textarea
+            value={customPrompt}
+            onChange={(e) => setCustomPrompt(e.target.value)}
+            placeholder="输入你想要的发型描述...（选择预设会自动填入）"
+            className="w-full h-20 px-4 py-3 rounded-xl bg-[#1a1a1a] border border-gray-700 text-white placeholder-gray-500 resize-none focus:outline-none focus:border-[#667eea] transition-colors"
+          />
+          <p className="text-xs text-gray-500 mt-1 text-center">
+            选择预设会自动填入，也可手动修改
+          </p>
+        </div>
+
+        {/* Generate Button */}
+        <button
+          onClick={handleGenerate}
+          disabled={!customPrompt.trim() || isGenerating}
+          className={`w-full py-3 rounded-xl font-medium text-base transition-all ${
+            customPrompt.trim() && !isGenerating
+              ? "bg-gradient-to-r from-[#667eea] to-[#764ba2] hover:opacity-90"
+              : "bg-gray-700 cursor-not-allowed opacity-50"
+          }`}
+        >
+          {isGenerating ? "✨ 生成中..." : "🚀 开始生成"}
+        </button>
+
+        {/* Error */}
+        {error && (
+          <div className="text-center text-red-400 text-sm">{error}</div>
         )}
 
-        {/* Step 3: Processing */}
-        {step === "processing" && (
-          <div className="text-center py-12">
-            <div className="inline-flex items-center justify-center w-20 h-20 rounded-full gradient-bg mb-6">
-              <div className="text-3xl">✨</div>
-            </div>
-            <h2 className="text-2xl font-bold mb-2">
-              {processingStatus === "uploading" && "上传中..."}
-              {processingStatus === "processing" && "AI 处理中..."}
-            </h2>
-            <p className="text-gray-400 mb-4">
-              {processingStatus === "uploading" && "正在上传图片..."}
-              {processingStatus === "processing" && "预计需要 30-60 秒"}
-            </p>
-
-            {/* Progress indicator */}
-            <div className="max-w-xs mx-auto">
-              <div className="h-2 bg-[#1a1a1a] rounded-full overflow-hidden">
-                <div
-                  className={`h-full gradient-bg shimmer ${
-                    processingStatus === "uploading"
-                      ? "w-1/3"
-                      : "w-2/3 animate-pulse"
-                  }`}
-                />
-              </div>
-            </div>
-
-            {errorMessage && (
-              <div className="mt-6">
-                <p className="text-red-400 mb-4">{errorMessage}</p>
-                <button
-                  onClick={handleStartOver}
-                  className="px-6 py-2 rounded-xl bg-[#1a1a1a] hover:bg-[#2a2a2a] transition-colors"
-                >
-                  重新开始
-                </button>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Step 4: Result */}
-        {step === "result" && resultImage && (
-          <div className="space-y-6">
-            {/* Result Image */}
-            <div className="rounded-2xl overflow-hidden gradient-border">
-              <img
-                src={resultImage}
-                alt="Result"
-                className="w-full h-auto max-h-96 object-contain bg-[#1a1a1a]"
-              />
-            </div>
-
-            <p className="text-center text-green-400 font-medium">
-              ✨ 处理完成！
-            </p>
-
-            {/* Actions */}
-            <div className="flex gap-4">
-              <button
-                onClick={handleDownload}
-                className="flex-1 py-4 rounded-xl gradient-bg hover:opacity-90 hover:shadow-lg hover:shadow-purple-500/30 font-medium transition-all"
-              >
-                📥 下载图片
-              </button>
-              <button
-                onClick={handleStartOver}
-                className="flex-1 py-4 rounded-xl bg-[#1a1a1a] hover:bg-[#2a2a2a] transition-colors font-medium"
-              >
-                🔄 重新开始
-              </button>
-            </div>
-          </div>
-        )}
+        {/* Reset Button */}
+        <button
+          onClick={handleReset}
+          className="w-full py-2 rounded-xl bg-[#1a1a1a] hover:bg-[#2a2a2a] transition-colors font-medium text-sm"
+        >
+          🔄 重新开始
+        </button>
       </main>
 
       {/* Footer */}
-      <footer className="text-center py-6 text-gray-500 text-sm">
-        <p>头像仅用于本次处理，不存储服务器</p>
+      <footer className="text-center py-4 text-gray-500 text-xs">
+        <p>使用 Pollinations AI 免费生成</p>
       </footer>
     </div>
   );
