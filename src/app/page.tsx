@@ -57,10 +57,34 @@ export default function Home() {
     reader.readAsDataURL(file);
   }, []);
 
+  // Fix: allow re-uploading same file by resetting input value
+  const handleReuploadClick = useCallback(() => {
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+    fileInputRef.current?.click();
+  }, []);
+
   const handlePresetClick = useCallback((preset: Preset) => {
     setSelectedPreset(preset.id);
     setCustomPrompt(preset.prompt);
   }, []);
+
+  // Poll a Replicate prediction until it completes
+  const pollPrediction = async (predictionId: string, maxAttempts = 60): Promise<{ image?: string; error?: string }> => {
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      try {
+        const res = await fetch(`/api/predict?predictionId=${predictionId}`);
+        const data = await res.json();
+        if (data.status === "succeeded") return { image: data.image };
+        if (data.status === "failed") return { error: data.error || "生成失败" };
+      } catch {
+        // keep polling
+      }
+    }
+    return { error: "生成超时，请重试" };
+  };
 
   const handleGenerate = useCallback(async () => {
     const promptToUse = customPrompt.trim();
@@ -70,22 +94,54 @@ export default function Home() {
       return;
     }
 
+    if (!imageData) {
+      setError("请先上传照片");
+      return;
+    }
+
     setIsGenerating(true);
     setError(null);
     setResultUrl(null);
 
     try {
-      // Build the Pollinations URL directly
-      const encodedPrompt = encodeURIComponent(promptToUse);
-      const imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=512&height=512&model=flux&nologo=true&seed=${Date.now()}`;
-      
-      setResultUrl(imageUrl);
+      // Send to our API route that uses Replicate img2img with the uploaded image
+      const formData = new FormData();
+      formData.append("image", imageData); // base64 data URL
+      formData.append("prompt", promptToUse);
+
+      const response = await fetch("/api/replicate", {
+        method: "POST",
+        body: formData,
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        setError(data.error || "生成失败，请重试");
+        setIsGenerating(false);
+        return;
+      }
+
+      if (data.predictionId) {
+        // Poll for result
+        const pollResult = await pollPrediction(data.predictionId);
+        if (pollResult.image) {
+          setResultUrl(pollResult.image);
+        } else {
+          setError(pollResult.error || "生成失败");
+        }
+      } else if (data.image) {
+        // Direct URL returned
+        setResultUrl(data.image);
+      } else {
+        setError("生成失败，请重试");
+      }
     } catch (err) {
       setError("生成失败，请重试");
     } finally {
       setIsGenerating(false);
     }
-  }, [customPrompt]);
+  }, [customPrompt, imageData]);
 
   const handleReset = useCallback(() => {
     setImageData(null);
@@ -174,7 +230,7 @@ export default function Home() {
         {/* Upload Button (shown when image exists) */}
         {imageData && (
           <button
-            onClick={() => fileInputRef.current?.click()}
+            onClick={handleReuploadClick}
             className="w-full py-2 rounded-xl bg-[#252525] hover:bg-[#333] transition-colors text-sm"
           >
             📷 重新上传照片
