@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 
 type Hairstyle = "short" | "long" | "curly" | "ponytail" | "bun" | "bald";
 
@@ -20,6 +20,35 @@ const PRESETS: Preset[] = [
   { id: "bald", name: "光头", emoji: "😎", prompt: "A bald person with shaved head, realistic portrait photo, studio lighting" },
 ];
 
+// HuggingFace Inference API - text-to-image
+async function generateWithHF(prompt: string, hfToken: string, signal?: AbortSignal): Promise<string> {
+  const response = await fetch(
+    "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-dev",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${hfToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        inputs: prompt,
+        options: {
+          wait_for_model: true,
+        },
+      }),
+      signal,
+    }
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(errorText || `HF API error: ${response.status}`);
+  }
+
+  const blob = await response.blob();
+  return URL.createObjectURL(blob);
+}
+
 export default function Home() {
   const [imageData, setImageData] = useState<string | null>(null);
   const [selectedPreset, setSelectedPreset] = useState<Hairstyle | null>(null);
@@ -28,8 +57,22 @@ export default function Home() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [resultUrl, setResultUrl] = useState<string | null>(null);
   const [fileName, setFileName] = useState<string>("");
+  const [hfToken, setHfToken] = useState<string>("");
+  const [showTokenInput, setShowTokenInput] = useState(false);
   const [generationTime, setGenerationTime] = useState<string>("");
+  const abortControllerRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // 从 sessionStorage 读取 token
+  useEffect(() => {
+    const saved = sessionStorage.getItem("hf_token");
+    if (saved) {
+      setHfToken(saved);
+      setShowTokenInput(false);
+    } else {
+      setShowTokenInput(true);
+    }
+  }, []);
 
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -70,6 +113,18 @@ export default function Home() {
     setCustomPrompt(preset.prompt);
   }, []);
 
+  const handleTokenSave = useCallback((token: string) => {
+    const trimmed = token.trim();
+    if (!trimmed.startsWith("hf_")) {
+      setError("Token 格式不对，应以 hf_ 开头");
+      return;
+    }
+    setHfToken(trimmed);
+    sessionStorage.setItem("hf_token", trimmed);
+    setShowTokenInput(false);
+    setError(null);
+  }, []);
+
   const handleGenerate = useCallback(async () => {
     const promptToUse = customPrompt.trim();
 
@@ -78,32 +133,69 @@ export default function Home() {
       return;
     }
 
+    if (!hfToken) {
+      setError("请先填写 HuggingFace Token");
+      setShowTokenInput(true);
+      return;
+    }
+
+    // 清理旧的结果 URL
+    if (resultUrl) {
+      URL.revokeObjectURL(resultUrl);
+    }
+
+    // 取消之前的请求
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    abortControllerRef.current = new AbortController();
+
     setIsGenerating(true);
     setError(null);
     setResultUrl(null);
     setGenerationTime("");
-
     const startTime = Date.now();
 
     try {
-      // 直接使用 Pollinations URL，浏览器直接请求，不走服务器
-      const encodedPrompt = encodeURIComponent(promptToUse);
-      // 加上 seed=时间戳确保每次生成不同
-      const imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=512&height=512&model=flux&nologo=true&seed=${Date.now()}&ref=hairstyle-change`;
+      setGenerationTime("模型加载中（首次可能较慢）...");
 
-      setResultUrl(imageUrl);
+      const imageBlobUrl = await generateWithHF(
+        promptToUse,
+        hfToken,
+        abortControllerRef.current.signal
+      );
 
-      // Pollinations 生成需要几秒钟，估算一下时间
       const elapsed = Math.round((Date.now() - startTime) / 1000);
-      setGenerationTime(`${elapsed} 秒`);
-    } catch (err) {
-      setError("生成失败，请重试");
+      setGenerationTime(`生成成功 (${elapsed}秒)`);
+      setResultUrl(imageBlobUrl);
+    } catch (err: any) {
+      if (err.name === "AbortError") {
+        setError("请求已取消");
+      } else if (err.message?.includes("401")) {
+        setError("Token 无效，请检查 HF Token 是否正确");
+        setShowTokenInput(true);
+      } else if (err.message?.includes("403")) {
+        setError("Token 权限不足，需要有 Inference API 访问权限");
+        setShowTokenInput(true);
+      } else if (err.message?.includes("503") || err.message?.includes("Model is currently loading")) {
+        setError("模型正在加载中，请稍等几秒再试");
+        setGenerationTime("");
+      } else {
+        setError(err.message || "生成失败，请重试");
+        setGenerationTime("");
+      }
     } finally {
       setIsGenerating(false);
     }
-  }, [customPrompt]);
+  }, [customPrompt, hfToken, resultUrl]);
 
   const handleReset = useCallback(() => {
+    if (resultUrl) {
+      URL.revokeObjectURL(resultUrl);
+    }
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
     setImageData(null);
     setSelectedPreset(null);
     setCustomPrompt("");
@@ -114,7 +206,7 @@ export default function Home() {
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
-  }, []);
+  }, [resultUrl]);
 
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-white font-sans">
@@ -128,6 +220,40 @@ export default function Home() {
 
       {/* Main */}
       <main className="max-w-4xl mx-auto px-4 pb-8 space-y-5">
+
+        {/* Token Input */}
+        {showTokenInput && (
+          <div className="rounded-xl bg-[#1a1a1a] border border-gray-700 p-4 space-y-3">
+            <div className="text-center text-sm text-gray-300">
+              <p className="mb-1">🔑 首次使用需要 HuggingFace Token（免费）</p>
+              <p className="text-xs text-gray-500">
+                获得方式：HF 设置 → Access Tokens → New Token → 选 <code className="bg-gray-800 px-1 rounded">Read</code> 类型
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <input
+                type="password"
+                placeholder="hf_xxxxxxxxxx"
+                className="flex-1 px-4 py-2 rounded-lg bg-[#252525] border border-gray-600 text-white placeholder-gray-500 text-sm focus:outline-none focus:border-[#667eea]"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    handleTokenSave((e.target as HTMLInputElement).value);
+                  }
+                }}
+                id="hf-token-input"
+              />
+              <button
+                onClick={() => handleTokenSave((document.getElementById("hf-token-input") as HTMLInputElement).value)}
+                className="px-4 py-2 rounded-lg bg-[#667eea] hover:bg-[#5568d4] text-white text-sm font-medium transition-colors"
+              >
+                确定
+              </button>
+            </div>
+            {error && error.includes("Token") && (
+              <div className="text-red-400 text-xs text-center">{error}</div>
+            )}
+          </div>
+        )}
 
         {/* Upload Area */}
         {!imageData && (
@@ -184,11 +310,6 @@ export default function Home() {
                   src={resultUrl}
                   alt="结果"
                   className="max-w-full max-h-[300px] object-contain"
-                  onLoad={() => setGenerationTime("生成完成")}
-                  onError={() => {
-                    setError("生成失败，可能是网络问题，请重试");
-                    setResultUrl(null);
-                  }}
                 />
               ) : (
                 <div className="text-gray-500 text-sm">点击生成后显示</div>
@@ -242,12 +363,26 @@ export default function Home() {
           </p>
         </div>
 
+        {/* Token toggle */}
+        {!showTokenInput && (
+          <button
+            onClick={() => {
+              setShowTokenInput(true);
+              setHfToken("");
+              sessionStorage.removeItem("hf_token");
+            }}
+            className="w-full py-2 rounded-xl bg-[#1a1a1a] hover:bg-[#2a2a2a] transition-colors text-xs text-gray-500"
+          >
+            🔑 更换 HuggingFace Token
+          </button>
+        )}
+
         {/* Generate Button */}
         <button
           onClick={handleGenerate}
-          disabled={!customPrompt.trim() || isGenerating}
+          disabled={!customPrompt.trim() || isGenerating || !hfToken}
           className={`w-full py-3 rounded-xl font-medium text-base transition-all ${
-            customPrompt.trim() && !isGenerating
+            customPrompt.trim() && !isGenerating && hfToken
               ? "bg-gradient-to-r from-[#667eea] to-[#764ba2] hover:opacity-90"
               : "bg-gray-700 cursor-not-allowed opacity-50"
           }`}
@@ -256,7 +391,7 @@ export default function Home() {
         </button>
 
         {/* Error */}
-        {error && (
+        {error && !error.includes("Token") && (
           <div className="text-center text-red-400 text-sm">{error}</div>
         )}
 
@@ -271,7 +406,7 @@ export default function Home() {
 
       {/* Footer */}
       <footer className="text-center py-4 text-gray-500 text-xs">
-        <p>使用 Pollinations AI 免费生成</p>
+        <p>使用 HuggingFace Inference API 免费额度生成</p>
       </footer>
     </div>
   );
