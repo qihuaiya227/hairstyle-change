@@ -28,7 +28,7 @@ export default function Home() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [resultUrl, setResultUrl] = useState<string | null>(null);
   const [fileName, setFileName] = useState<string>("");
-  const [fileSize, setFileSize] = useState<number>(0);
+  const [generationTime, setGenerationTime] = useState<string>("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -47,8 +47,8 @@ export default function Home() {
 
     setError(null);
     setFileName(file.name);
-    setFileSize(file.size);
     setResultUrl(null);
+    setGenerationTime("");
 
     const reader = new FileReader();
     reader.onload = (event) => {
@@ -57,7 +57,7 @@ export default function Home() {
     reader.readAsDataURL(file);
   }, []);
 
-  // Fix: allow re-uploading same file by resetting input value
+  // Fix: 解决同文件无法重复上传的问题
   const handleReuploadClick = useCallback(() => {
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
@@ -70,78 +70,38 @@ export default function Home() {
     setCustomPrompt(preset.prompt);
   }, []);
 
-  // Poll a Replicate prediction until it completes
-  const pollPrediction = async (predictionId: string, maxAttempts = 60): Promise<{ image?: string; error?: string }> => {
-    for (let i = 0; i < maxAttempts; i++) {
-      await new Promise((r) => setTimeout(r, 2000));
-      try {
-        const res = await fetch(`/api/predict?predictionId=${predictionId}`);
-        const data = await res.json();
-        if (data.status === "succeeded") return { image: data.image };
-        if (data.status === "failed") return { error: data.error || "生成失败" };
-      } catch {
-        // keep polling
-      }
-    }
-    return { error: "生成超时，请重试" };
-  };
-
   const handleGenerate = useCallback(async () => {
     const promptToUse = customPrompt.trim();
-    
+
     if (!promptToUse) {
       setError("请选择预设或输入自定义描述");
-      return;
-    }
-
-    if (!imageData) {
-      setError("请先上传照片");
       return;
     }
 
     setIsGenerating(true);
     setError(null);
     setResultUrl(null);
+    setGenerationTime("");
+
+    const startTime = Date.now();
 
     try {
-      // Send to our API route that uses Replicate img2img with the uploaded image
-      const formData = new FormData();
-      formData.append("image", imageData); // base64 data URL
-      formData.append("prompt", promptToUse);
+      // 直接使用 Pollinations URL，浏览器直接请求，不走服务器
+      const encodedPrompt = encodeURIComponent(promptToUse);
+      // 加上 seed=时间戳确保每次生成不同
+      const imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=512&height=512&model=flux&nologo=true&seed=${Date.now()}&ref=hairstyle-change`;
 
-      const response = await fetch("/api/replicate", {
-        method: "POST",
-        body: formData,
-      });
+      setResultUrl(imageUrl);
 
-      const data = await response.json();
-
-      if (!response.ok) {
-        setError(data.error || "生成失败，请重试");
-        setIsGenerating(false);
-        return;
-      }
-
-      if (data.predictionId) {
-        // Poll for result
-        const pollResult = await pollPrediction(data.predictionId);
-        if (pollResult.image) {
-          setResultUrl(pollResult.image);
-        } else {
-          setError(pollResult.error || "生成失败");
-        }
-      } else if (data.image) {
-        // Direct URL returned
-        setResultUrl(data.image);
-      } else {
-        setError("生成失败，请重试");
-      }
+      // Pollinations 生成需要几秒钟，估算一下时间
+      const elapsed = Math.round((Date.now() - startTime) / 1000);
+      setGenerationTime(`${elapsed} 秒`);
     } catch (err) {
       setError("生成失败，请重试");
     } finally {
       setIsGenerating(false);
     }
-  }, [customPrompt, imageData]);
+  }, [customPrompt]);
 
   const handleReset = useCallback(() => {
     setImageData(null);
@@ -150,7 +110,7 @@ export default function Home() {
     setError(null);
     setResultUrl(null);
     setFileName("");
-    setFileSize(0);
+    setGenerationTime("");
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
@@ -168,7 +128,7 @@ export default function Home() {
 
       {/* Main */}
       <main className="max-w-4xl mx-auto px-4 pb-8 space-y-5">
-        
+
         {/* Upload Area */}
         {!imageData && (
           <div
@@ -211,14 +171,24 @@ export default function Home() {
           {/* Result */}
           <div className="rounded-xl bg-[#1a1a1a] overflow-hidden">
             <div className="px-3 py-2 bg-[#252525] text-center text-xs text-green-400">
-              ✨ 生成结果
+              ✨ 生成结果 {generationTime && <span className="text-gray-500 ml-1">({generationTime})</span>}
             </div>
             <div className="flex flex-col items-center justify-center min-h-[200px] bg-[#1a1a1a]">
-              {resultUrl ? (
+              {isGenerating ? (
+                <div className="text-center">
+                  <div className="text-3xl mb-2 animate-pulse">✨</div>
+                  <div className="text-gray-400 text-sm">AI 生成中，请稍候...</div>
+                </div>
+              ) : resultUrl ? (
                 <img
                   src={resultUrl}
                   alt="结果"
                   className="max-w-full max-h-[300px] object-contain"
+                  onLoad={() => setGenerationTime("生成完成")}
+                  onError={() => {
+                    setError("生成失败，可能是网络问题，请重试");
+                    setResultUrl(null);
+                  }}
                 />
               ) : (
                 <div className="text-gray-500 text-sm">点击生成后显示</div>
